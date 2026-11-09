@@ -1,0 +1,28 @@
+name: PocketFit
+options:
+  bundleIdPrefix: dev.pocketfit
+  deploymentTarget:
+    iOS: "16.0"
+targets:
+  PocketFit:
+    type: application
+    platform: iOS
+    sources:
+      - PocketFit
+    dependencies:
+      - framework: Frameworks/llama.xcframework
+        embed: true
+    info:
+      path: PocketFit/Info.plist
+      properties:
+        CFBundleDisplayName: PocketFit
+        UILaunchScreen: {}
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.pocketfit.app
+        SWIFT_VERSION: "5.9"
+        TARGETED_DEVICE_FAMILY: "1"

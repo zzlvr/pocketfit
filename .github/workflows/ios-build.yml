@@ -1,0 +1,54 @@
+name: ios-build
+
+on:
+  push:
+  workflow_dispatch:
+
+env:
+  # Фиксированная сборка llama.cpp, чтобы API не менялся между запусками
+  LLAMA_TAG: b12230
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Fetch llama.cpp xcframework
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p /tmp/llama ios/Frameworks
+          gh release download "$LLAMA_TAG" --repo ggml-org/llama.cpp \
+            --pattern "llama-${LLAMA_TAG}-xcframework.zip" --dir /tmp/llama
+          unzip -q /tmp/llama/llama-${LLAMA_TAG}-xcframework.zip -d /tmp/llama/x
+          cp -R /tmp/llama/x/build-apple/llama.xcframework ios/Frameworks/
+
+      - name: Generate Xcode project
+        working-directory: ios
+        run: xcodegen generate
+
+      - name: Build (unsigned, for iPhone)
+        working-directory: ios
+        run: |
+          xcodebuild -project PocketFit.xcodeproj -scheme PocketFit \
+            -configuration Release -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package unsigned IPA
+        run: |
+          mkdir -p out/Payload
+          cp -R ios/build/Build/Products/Release-iphoneos/PocketFit.app out/Payload/
+          (cd out && zip -qry PocketFit.ipa Payload)
+          ls -la out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PocketFit-ipa
+          path: out/PocketFit.ipa

@@ -1,0 +1,7 @@
+ios/Frameworks/
+ios/build/
+ios/PocketFit.xcodeproj/
+ios/PocketFit/Info.plist
+out/
+*.gguf
+.DS_Store
