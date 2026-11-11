@@ -6,4 +6,3 @@ out/
 *.gguf
 .DS_Store
 CLAUDE.md
-AGENTS.md
