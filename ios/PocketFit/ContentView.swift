@@ -43,7 +43,7 @@ struct ContentView: View {
 
                 Section {
                     Toggle("GPU (Metal)", isOn: $useGPU)
-                    Button(isRunning ? "Running…" : "Run") { run() }
+                    Button(isRunning ? "Running..." : "Run") { run() }
                         .disabled(isRunning || selected == nil)
                 }
 
@@ -102,7 +102,7 @@ struct ContentView: View {
         guard let modelURL = selected else { return }
         isRunning = true
         result = nil
-        status = "Loading model and generating…"
+        status = "Loading model and generating..."
         let path = modelURL.path
         let text = prompt
         let gpu = useGPU
