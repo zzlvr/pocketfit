@@ -5,10 +5,11 @@ struct ContentView: View {
     @State private var models: [URL] = []
     @State private var selected: URL?
     @State private var prompt = "Hello! Tell me one fun fact about the moon."
-    @State private var status = "Положи .gguf-файл в папку приложения (Файлы → На iPhone → PocketFit) или импортируй кнопкой."
+    @State private var status = "Import a .gguf model with the button below."
     @State private var result: BenchResult?
     @State private var isRunning = false
     @State private var showImporter = false
+    @State private var useGPU = true
 
     private var documentsURL: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -17,9 +18,9 @@ struct ContentView: View {
     var body: some View {
         NavigationView {
             Form {
-                Section("Модель") {
+                Section("Model") {
                     if models.isEmpty {
-                        Text("Нет .gguf файлов").foregroundColor(.secondary)
+                        Text("No .gguf files").foregroundColor(.secondary)
                     }
                     ForEach(models, id: \.self) { url in
                         Button {
@@ -32,28 +33,32 @@ struct ContentView: View {
                             }
                         }
                     }
-                    Button("Импортировать .gguf") { showImporter = true }
-                    Button("Обновить список") { refreshModels() }
+                    Button("Import .gguf") { showImporter = true }
+                    Button("Refresh list") { refreshModels() }
                 }
 
-                Section("Промпт") {
-                    TextField("Промпт", text: $prompt, axis: .vertical)
+                Section("Prompt") {
+                    TextField("Prompt", text: $prompt, axis: .vertical)
                 }
 
                 Section {
-                    Button(isRunning ? "Идёт замер…" : "Запустить") { run() }
+                    Toggle("GPU (Metal)", isOn: $useGPU)
+                    Button(isRunning ? "Running…" : "Run") { run() }
                         .disabled(isRunning || selected == nil)
                 }
 
-                Section("Результат") {
+                Section("Result") {
                     Text(status).font(.footnote).foregroundColor(.secondary)
                     if let r = result {
-                        Text(String(format: "Скорость генерации: %.1f токенов/с", r.tokensPerSecond))
-                        Text(String(format: "Время до первого токена: %.2f с", r.timeToFirstTokenSeconds))
-                        Text(String(format: "Загрузка модели: %.2f с", r.loadSeconds))
-                        Text("Токенов в промпте: \(r.promptTokens), сгенерировано: \(r.generatedTokens)")
-                        Text(String(format: "Размер модели: %.0f МБ", r.modelSizeMB))
+                        Text(String(format: "Generation speed: %.1f tokens/s", r.tokensPerSecond))
+                        Text(String(format: "Time to first token: %.2f s", r.timeToFirstTokenSeconds))
+                        Text(String(format: "Model load time: %.2f s", r.loadSeconds))
+                        Text("Prompt tokens: \(r.promptTokens), generated: \(r.generatedTokens)")
+                        Text(String(format: "Model size: %.0f MB", r.modelSizeMB))
                         Text(r.modelDescription).font(.footnote)
+                        Text("GPU requested: \(r.gpuRequested ? "yes" : "no"), GPU offload supported: \(r.gpuOffloadSupported ? "yes" : "no")")
+                        Text("Thermal state at start: \(r.thermalState)")
+                        Text(r.systemInfo).font(.caption2).foregroundColor(.secondary)
                         Text(r.text).font(.body)
                     }
                 }
@@ -75,7 +80,7 @@ struct ContentView: View {
     private func importModel(_ importResult: Result<URL, Error>) {
         switch importResult {
         case .failure(let error):
-            status = "Импорт не удался: \(error.localizedDescription)"
+            status = "Import failed: \(error.localizedDescription)"
         case .success(let url):
             let access = url.startAccessingSecurityScopedResource()
             defer { if access { url.stopAccessingSecurityScopedResource() } }
@@ -85,10 +90,10 @@ struct ContentView: View {
                     try FileManager.default.removeItem(at: dest)
                 }
                 try FileManager.default.copyItem(at: url, to: dest)
-                status = "Импортировано: \(dest.lastPathComponent)"
+                status = "Imported: \(dest.lastPathComponent)"
                 refreshModels()
             } catch {
-                status = "Копирование не удалось: \(error.localizedDescription)"
+                status = "Copy failed: \(error.localizedDescription)"
             }
         }
     }
@@ -97,20 +102,21 @@ struct ContentView: View {
         guard let modelURL = selected else { return }
         isRunning = true
         result = nil
-        status = "Загружаю модель и генерирую…"
+        status = "Loading model and generating…"
         let path = modelURL.path
         let text = prompt
+        let gpu = useGPU
         Task.detached {
             do {
-                let r = try LlamaRunner.run(modelPath: path, prompt: text, maxNewTokens: 64)
+                let r = try LlamaRunner.run(modelPath: path, prompt: text, maxNewTokens: 64, useGPU: gpu)
                 await MainActor.run {
                     result = r
-                    status = "Готово"
+                    status = "Done"
                     isRunning = false
                 }
             } catch {
                 await MainActor.run {
-                    status = "Ошибка: \(error.localizedDescription)"
+                    status = "Error: \(error.localizedDescription)"
                     isRunning = false
                 }
             }

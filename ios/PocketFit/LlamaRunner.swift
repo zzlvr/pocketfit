@@ -10,6 +10,20 @@ struct BenchResult {
     var tokensPerSecond: Double
     var modelDescription: String
     var modelSizeMB: Double
+    var gpuRequested: Bool
+    var gpuOffloadSupported: Bool
+    var systemInfo: String
+    var thermalState: String
+}
+
+func thermalStateName(_ state: ProcessInfo.ThermalState) -> String {
+    switch state {
+    case .nominal: return "nominal"
+    case .fair: return "fair"
+    case .serious: return "serious"
+    case .critical: return "critical"
+    @unknown default: return "unknown"
+    }
 }
 
 enum LlamaError: Error, LocalizedError {
@@ -20,24 +34,25 @@ enum LlamaError: Error, LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .modelLoadFailed: return "Не удалось загрузить модель (файл повреждён или не хватает памяти)"
-        case .contextFailed: return "Не удалось создать контекст (вероятно, не хватает памяти)"
-        case .tokenizeFailed: return "Не удалось разбить промпт на токены"
-        case .decodeFailed(let code): return "Ошибка декодирования, код \(code)"
+        case .modelLoadFailed: return "Could not load the model (corrupt file or not enough memory)"
+        case .contextFailed: return "Could not create a context (probably not enough memory)"
+        case .tokenizeFailed: return "Could not tokenize the prompt"
+        case .decodeFailed(let code): return "Decode failed with code \(code)"
         }
     }
 }
 
-/// Минимальный запуск llama.cpp на устройстве: загрузка модели, жадная генерация, замер скорости.
+/// Minimal on-device llama.cpp run: load a model, generate greedily, measure speed.
 enum LlamaRunner {
-    static func run(modelPath: String, prompt: String, maxNewTokens: Int, contextSize: Int = 2048) throws -> BenchResult {
+    static func run(modelPath: String, prompt: String, maxNewTokens: Int, useGPU: Bool = true, contextSize: Int = 2048) throws -> BenchResult {
         llama_backend_init()
         defer { llama_backend_free() }
 
+        let thermalAtStart = thermalStateName(ProcessInfo.processInfo.thermalState)
         let loadStart = CFAbsoluteTimeGetCurrent()
 
         var modelParams = llama_model_default_params()
-        modelParams.n_gpu_layers = 999 // все слои на Metal GPU
+        modelParams.n_gpu_layers = useGPU ? 999 : 0 // 999 = all layers on Metal GPU, 0 = CPU only
 
         guard let model = llama_model_load_from_file(modelPath, modelParams) else {
             throw LlamaError.modelLoadFailed
@@ -62,7 +77,7 @@ enum LlamaRunner {
 
         guard let vocab = llama_model_get_vocab(model) else { throw LlamaError.modelLoadFailed }
 
-        // Токенизация промпта
+        // Tokenize the prompt
         var tokens = [llama_token](repeating: 0, count: contextSize)
         let promptByteCount = Int32(prompt.utf8.count)
         let tokenCount = llama_tokenize(vocab, prompt, promptByteCount, &tokens, Int32(tokens.count), true, true)
@@ -73,7 +88,7 @@ enum LlamaRunner {
         llama_sampler_chain_add(sampler, llama_sampler_init_greedy())
         defer { llama_sampler_free(sampler) }
 
-        // Обработка промпта
+        // Process the prompt
         let promptStart = CFAbsoluteTimeGetCurrent()
         let promptRC = tokens.withUnsafeMutableBufferPointer { buf -> Int32 in
             let batch = llama_batch_get_one(buf.baseAddress, Int32(buf.count))
@@ -85,7 +100,7 @@ enum LlamaRunner {
         let firstTokenTime = CFAbsoluteTimeGetCurrent()
         let ttft = firstTokenTime - promptStart
 
-        // Генерация
+        // Generate
         var outBytes = [UInt8]()
         var generated = 0
         var pieceBuf = [CChar](repeating: 0, count: 256)
@@ -116,7 +131,11 @@ enum LlamaRunner {
             timeToFirstTokenSeconds: ttft,
             tokensPerSecond: tps,
             modelDescription: modelDescription,
-            modelSizeMB: modelSizeMB
+            modelSizeMB: modelSizeMB,
+            gpuRequested: useGPU,
+            gpuOffloadSupported: llama_supports_gpu_offload(),
+            systemInfo: String(cString: llama_print_system_info()),
+            thermalState: thermalAtStart
         )
     }
 }

@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
 
 env:
-  # Фиксированная сборка llama.cpp, чтобы API не менялся между запусками
+  # Pinned llama.cpp build so the API does not change between runs
   LLAMA_TAG: b12230
 
 jobs:
