@@ -10,6 +10,9 @@ struct ContentView: View {
     @State private var isRunning = false
     @State private var showImporter = false
     @State private var useGPU = true
+    @State private var benchRuns: [BenchResult] = []
+    private let benchCount = 5
+    private let benchPauseSeconds: UInt64 = 10
 
     private var documentsURL: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -45,6 +48,21 @@ struct ContentView: View {
                     Toggle("GPU (Metal)", isOn: $useGPU)
                     Button(isRunning ? "Running..." : "Run") { run() }
                         .disabled(isRunning || selected == nil)
+                    Button("Benchmark (\(benchCount) runs)") { runBenchmark() }
+                        .disabled(isRunning || selected == nil)
+                }
+
+                if !benchRuns.isEmpty {
+                    Section("Benchmark") {
+                        ForEach(Array(benchRuns.enumerated()), id: \.offset) { index, r in
+                            Text("#\(index + 1): \(String(format: "%.1f", r.tokensPerSecond)) tokens/s, thermal \(r.thermalState) -> \(r.thermalStateEnd), charging: \(r.charging ? "yes" : "no")")
+                                .font(.footnote)
+                        }
+                        let speeds = benchRuns.map { $0.tokensPerSecond }
+                        if let lo = speeds.min(), let hi = speeds.max() {
+                            Text("Min \(String(format: "%.1f", lo)), max \(String(format: "%.1f", hi)), mean \(String(format: "%.1f", speeds.reduce(0, +) / Double(speeds.count))) tokens/s")
+                        }
+                    }
                 }
 
                 Section("Result") {
@@ -57,7 +75,8 @@ struct ContentView: View {
                         Text(String(format: "Model size: %.0f MB", r.modelSizeMB))
                         Text(r.modelDescription).font(.footnote)
                         Text("GPU requested: \(r.gpuRequested ? "yes" : "no"), GPU offload supported: \(r.gpuOffloadSupported ? "yes" : "no")")
-                        Text("Thermal state at start: \(r.thermalState)")
+                        Text("Thermal state: \(r.thermalState) at start, \(r.thermalStateEnd) at end")
+                        Text("Charging: \(r.charging ? "yes" : "no")")
                         Text(r.systemInfo).font(.caption2).foregroundColor(.secondary)
                         Text(r.text).font(.body)
                     }
@@ -106,9 +125,10 @@ struct ContentView: View {
         let path = modelURL.path
         let text = prompt
         let gpu = useGPU
+        let charging = isCharging()
         Task.detached {
             do {
-                let r = try LlamaRunner.run(modelPath: path, prompt: text, maxNewTokens: 64, useGPU: gpu)
+                let r = try LlamaRunner.run(modelPath: path, prompt: text, maxNewTokens: 64, useGPU: gpu, charging: charging)
                 await MainActor.run {
                     result = r
                     status = "Done"
@@ -121,5 +141,46 @@ struct ContentView: View {
                 }
             }
         }
+    }
+
+    private func runBenchmark() {
+        guard let modelURL = selected else { return }
+        isRunning = true
+        result = nil
+        benchRuns = []
+        let path = modelURL.path
+        let text = prompt
+        let gpu = useGPU
+        let count = benchCount
+        let pause = benchPauseSeconds
+        Task.detached {
+            do {
+                for i in 1...count {
+                    await MainActor.run { status = "Benchmark run \(i) of \(count)..." }
+                    let charging = await MainActor.run { isCharging() }
+                    let r = try LlamaRunner.run(modelPath: path, prompt: text, maxNewTokens: 64, useGPU: gpu, charging: charging)
+                    await MainActor.run { benchRuns.append(r) }
+                    if i < count {
+                        await MainActor.run { status = "Pausing \(pause) s before run \(i + 1)..." }
+                        try? await Task.sleep(nanoseconds: pause * 1_000_000_000)
+                    }
+                }
+                await MainActor.run {
+                    status = "Benchmark done"
+                    isRunning = false
+                }
+            } catch {
+                await MainActor.run {
+                    status = "Error: \(error.localizedDescription)"
+                    isRunning = false
+                }
+            }
+        }
+    }
+
+    private func isCharging() -> Bool {
+        UIDevice.current.isBatteryMonitoringEnabled = true
+        let state = UIDevice.current.batteryState
+        return state == .charging || state == .full
     }
 }

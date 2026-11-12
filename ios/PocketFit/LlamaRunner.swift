@@ -14,6 +14,8 @@ struct BenchResult {
     var gpuOffloadSupported: Bool
     var systemInfo: String
     var thermalState: String
+    var thermalStateEnd: String
+    var charging: Bool
 }
 
 func thermalStateName(_ state: ProcessInfo.ThermalState) -> String {
@@ -44,7 +46,7 @@ enum LlamaError: Error, LocalizedError {
 
 /// Minimal on-device llama.cpp run: load a model, generate greedily, measure speed.
 enum LlamaRunner {
-    static func run(modelPath: String, prompt: String, maxNewTokens: Int, useGPU: Bool = true, contextSize: Int = 2048) throws -> BenchResult {
+    static func run(modelPath: String, prompt: String, maxNewTokens: Int, useGPU: Bool = true, charging: Bool = false, contextSize: Int = 2048) throws -> BenchResult {
         llama_backend_init()
         defer { llama_backend_free() }
 
@@ -135,7 +137,9 @@ enum LlamaRunner {
             gpuRequested: useGPU,
             gpuOffloadSupported: llama_supports_gpu_offload(),
             systemInfo: String(cString: llama_print_system_info()),
-            thermalState: thermalAtStart
+            thermalState: thermalAtStart,
+            thermalStateEnd: thermalStateName(ProcessInfo.processInfo.thermalState),
+            charging: charging
         )
     }
 }
