@@ -19,6 +19,9 @@ targets:
         UILaunchScreen: {}
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
+        NSLocalNetworkUsageDescription: PocketFit lets a computer on your network send models to this phone and read benchmark results.
+        NSBonjourServices:
+          - _pocketfit._tcp
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
     settings:

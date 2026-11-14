@@ -11,6 +11,10 @@ struct ContentView: View {
     @State private var showImporter = false
     @State private var useGPU = true
     @State private var benchRuns: [BenchResult] = []
+    @State private var remoteOn = false
+    @State private var remoteToken = ""
+    @State private var remoteStatus = ""
+    @State private var server: DeviceServer?
     private let benchCount = 5
     private let benchPauseSeconds: UInt64 = 10
 
@@ -62,6 +66,16 @@ struct ContentView: View {
                         if let lo = speeds.min(), let hi = speeds.max() {
                             Text("Min \(String(format: "%.1f", lo)), max \(String(format: "%.1f", hi)), mean \(String(format: "%.1f", speeds.reduce(0, +) / Double(speeds.count))) tokens/s")
                         }
+                    }
+                }
+
+                Section("Computer connection") {
+                    Toggle("Accept connections", isOn: $remoteOn)
+                        .onChange(of: remoteOn) { on in setRemote(on) }
+                    if remoteOn {
+                        Text("Address: \(localIPAddress() ?? "not on Wi-Fi"):\(String(DeviceServer.port))")
+                        Text("Token: \(remoteToken)")
+                        Text(remoteStatus).font(.footnote).foregroundColor(.secondary)
                     }
                 }
 
@@ -176,6 +190,44 @@ struct ContentView: View {
                 }
             }
         }
+    }
+
+    private func setRemote(_ on: Bool) {
+        server?.stop()
+        server = nil
+        UIApplication.shared.isIdleTimerDisabled = on
+        guard on else {
+            remoteStatus = ""
+            return
+        }
+        let alphabet = Array("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
+        remoteToken = String((0..<10).compactMap { _ in alphabet.randomElement() })
+        let newServer = DeviceServer(token: remoteToken, modelsDirectory: documentsURL) { status in
+            DispatchQueue.main.async { remoteStatus = status }
+        }
+        do {
+            try newServer.start()
+            server = newServer
+            remoteStatus = "Starting..."
+        } catch {
+            remoteStatus = "Server failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func localIPAddress() -> String? {
+        var list: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&list) == 0, let first = list else { return nil }
+        defer { freeifaddrs(list) }
+        var address: String?
+        for pointer in sequence(first: first, next: { $0.pointee.ifa_next }) {
+            let interface = pointer.pointee
+            guard let addr = interface.ifa_addr, addr.pointee.sa_family == UInt8(AF_INET) else { continue }
+            guard String(cString: interface.ifa_name) == "en0" else { continue }
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            getnameinfo(addr, socklen_t(addr.pointee.sa_len), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST)
+            address = String(cString: host)
+        }
+        return address
     }
 
     private func isCharging() -> Bool {

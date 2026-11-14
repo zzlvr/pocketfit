@@ -1,7 +1,7 @@
 import Foundation
 import llama
 
-struct BenchResult {
+struct BenchResult: Codable {
     var text: String
     var promptTokens: Int
     var generatedTokens: Int
