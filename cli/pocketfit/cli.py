@@ -149,6 +149,12 @@ def _device_from_args(args):
         raise DeviceError("A pairing token is required: pass --token or set POCKETFIT_TOKEN")
     host = args.host or os.environ.get("POCKETFIT_HOST")
     port = args.port
+    if host and host.count(":") == 1:
+        # Accept "address:port" as well as a plain address.
+        host, _, port_text = host.partition(":")
+        if not port_text.isdigit():
+            raise DeviceError(f"Invalid port in --host: {port_text!r}")
+        port = int(port_text)
     if not host:
         devices = discover()
         if not devices:
@@ -222,6 +228,19 @@ def cmd_bench(args):
     return 0
 
 
+def _bounded(low, high):
+    """argparse type that accepts integers from low to high."""
+    def parse(text):
+        try:
+            value = int(text)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"{text!r} is not a whole number")
+        if not low <= value <= high:
+            raise argparse.ArgumentTypeError(f"must be between {low} and {high}")
+        return value
+    return parse
+
+
 def build_parser():
     parser = argparse.ArgumentParser(prog="pocketfit", description="Benchmark GGUF models on a real iPhone.")
     parser.add_argument("--host", help="device address (default: discover via Bonjour)")
@@ -240,9 +259,9 @@ def build_parser():
     bench = commands.add_parser("bench", help="upload a model if needed and benchmark it")
     bench.add_argument("model", help="path to a .gguf file")
     bench.add_argument("--gpu", action="store_true", help="use the GPU (Metal); default is CPU only")
-    bench.add_argument("--runs", type=int, default=5)
-    bench.add_argument("--pause", type=int, default=10, help="seconds between runs")
-    bench.add_argument("--tokens", type=int, default=64, help="tokens to generate per run")
+    bench.add_argument("--runs", type=_bounded(1, 20), default=5, help="runs, 1 to 20")
+    bench.add_argument("--pause", type=_bounded(0, 120), default=10, help="seconds between runs, 0 to 120")
+    bench.add_argument("--tokens", type=_bounded(1, 512), default=64, help="tokens to generate per run, 1 to 512")
     bench.add_argument("--force-upload", action="store_true", help="upload even if a file of the same size exists")
     bench.add_argument("--out", help="write the JSON result to this file")
     bench.set_defaults(func=cmd_bench)

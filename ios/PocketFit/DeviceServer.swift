@@ -74,13 +74,36 @@ struct BenchOptions {
     var tokens = 64
     var prompt = "Hello! Tell me one fun fact about the moon."
 
-    init(query: [String: String]) {
-        if let value = query["gpu"] { useGPU = (value == "1" || value == "true") }
-        if let value = query["runs"], let n = Int(value) { runs = min(max(n, 1), 50) }
-        if let value = query["pause"], let n = UInt64(value) { pauseSeconds = min(n, 600) }
-        if let value = query["tokens"], let n = Int(value) { tokens = min(max(n, 1), 512) }
-        if let value = query["prompt"], !value.isEmpty { prompt = String(value.prefix(2000)) }
+    /// Out-of-range values are rejected, not silently clamped, so the client always gets what it asked for.
+    init(query: [String: String]) throws {
+        if let value = query["gpu"] {
+            guard ["0", "1", "true", "false"].contains(value) else {
+                throw BenchOptionsError(message: "gpu must be 0 or 1")
+            }
+            useGPU = (value == "1" || value == "true")
+        }
+        runs = try Self.integer(query["runs"], name: "runs", default: runs, range: 1...20)
+        pauseSeconds = UInt64(try Self.integer(query["pause"], name: "pause", default: Int(pauseSeconds), range: 0...120))
+        tokens = try Self.integer(query["tokens"], name: "tokens", default: tokens, range: 1...512)
+        if let value = query["prompt"], !value.isEmpty {
+            guard value.count <= 2000 else {
+                throw BenchOptionsError(message: "prompt must be at most 2000 characters")
+            }
+            prompt = value
+        }
     }
+
+    private static func integer(_ text: String?, name: String, default value: Int, range: ClosedRange<Int>) throws -> Int {
+        guard let text = text else { return value }
+        guard let number = Int(text), range.contains(number) else {
+            throw BenchOptionsError(message: "\(name) must be between \(range.lowerBound) and \(range.upperBound)")
+        }
+        return number
+    }
+}
+
+struct BenchOptionsError: Error {
+    let message: String
 }
 
 // MARK: - Server
@@ -94,6 +117,7 @@ final class DeviceServer {
     static let maxModelBytes = 8 * 1_073_741_824
     static let maxFailedAttempts = 5
     static let lockoutSeconds: TimeInterval = 60
+    static let failureWindowSeconds: TimeInterval = 600
 
     let token: String
     let modelsDirectory: URL
@@ -107,6 +131,7 @@ final class DeviceServer {
 
     private struct AuthFailures {
         var count = 0
+        var lastFailure = Date.distantPast
         var blockedUntil: Date?
     }
 
@@ -117,6 +142,7 @@ final class DeviceServer {
     }
 
     func start() throws {
+        removeStaleUploads()
         guard let port = NWEndpoint.Port(rawValue: Self.port) else { return }
         let parameters = NWParameters.tcp
         parameters.requiredInterfaceType = .wifi // never listen on cellular or other interfaces
@@ -138,6 +164,22 @@ final class DeviceServer {
         }
         self.listener = listener
         listener.start(queue: queue)
+    }
+
+    /// Deletes partial uploads left behind by a crash or a dropped connection.
+    private func removeStaleUploads() {
+        let directory = modelsDirectory
+        queue.async {
+            let keys: [URLResourceKey] = [.contentModificationDateKey]
+            let urls = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: keys)) ?? []
+            for url in urls where url.lastPathComponent.hasSuffix(".gguf.part") {
+                let modified = (try? url.resourceValues(forKeys: Set(keys)))?.contentModificationDate ?? Date.distantPast
+                // An upload in progress keeps touching its file, so only old leftovers are removed.
+                if Date().timeIntervalSince(modified) > 300 {
+                    try? FileManager.default.removeItem(at: url)
+                }
+            }
+        }
     }
 
     func stop() {
@@ -184,6 +226,9 @@ final class DeviceServer {
     fileprivate func recordFailure(_ host: String) {
         var entry = failures[host] ?? AuthFailures()
         if let until = entry.blockedUntil, until <= Date() { entry = AuthFailures() }
+        // Old mistakes are forgotten, so a typo hours ago does not count towards a lockout.
+        if Date().timeIntervalSince(entry.lastFailure) > Self.failureWindowSeconds { entry.count = 0 }
+        entry.lastFailure = Date()
         entry.count += 1
         if entry.count >= Self.maxFailedAttempts {
             entry.blockedUntil = Date().addingTimeInterval(Self.lockoutSeconds)
@@ -201,17 +246,12 @@ final class DeviceServer {
     fileprivate func beginBusy() -> Bool {
         if busy { return false }
         busy = true
-        setAwake(true)
         return true
     }
 
-    fileprivate func endBusy() {
-        queue.async { self.busy = false }
-        setAwake(false)
-    }
-
-    private func setAwake(_ awake: Bool) {
-        DispatchQueue.main.async { UIApplication.shared.isIdleTimerDisabled = awake }
+    /// The screen stays awake for as long as "Accept connections" is on; the app owns that setting.
+    fileprivate func releaseBusy() {
+        busy = false
     }
 
     // MARK: Helpers
@@ -255,6 +295,7 @@ final class DeviceServer {
         var results: [BenchResult] = []
         do {
             for index in 1...options.runs {
+                if Task.isCancelled { return (499, Self.encode(ErrorBody(error: "Cancelled"))) }
                 let charging = await MainActor.run { DeviceServer.isCharging() }
                 let result = try await Task.detached(priority: .userInitiated) {
                     try LlamaRunner.run(
@@ -306,6 +347,7 @@ private final class Upload {
     let name: String
     let expected: Int
     var received = 0
+    var head = Data() // first bytes of the body, checked for the GGUF magic
     let handle: FileHandle
     let temp: URL
     let final: URL
@@ -329,6 +371,7 @@ private final class HTTPSession {
     private var request: HTTPRequest?
     private var upload: Upload?
     private var holdsBusy = false
+    private var benchTask: Task<Void, Never>?
     private var finished = false
     private var closed = false
     private var lastActivity = Date()
@@ -382,8 +425,13 @@ private final class HTTPSession {
             if let data = data, !data.isEmpty {
                 self.consume(data)
             }
-            if error != nil || (isComplete && !self.finished) {
+            if error != nil {
                 self.close()
+                return
+            }
+            if isComplete && !self.finished {
+                // The client closed its sending side. Keep the connection only while a response is still pending.
+                if self.request == nil || self.upload != nil { self.close() }
                 return
             }
             if !self.finished && !self.closed {
@@ -406,6 +454,10 @@ private final class HTTPSession {
         let head = buffer.subdata(in: buffer.startIndex..<range.lowerBound)
         let rest = buffer.subdata(in: range.upperBound..<buffer.endIndex)
         buffer.removeAll()
+        guard head.count <= 16_384 else {
+            respondError(431, "Request headers too large")
+            return
+        }
         guard let parsed = parse(head) else {
             respondError(400, "Malformed request")
             return
@@ -479,17 +531,29 @@ private final class HTTPSession {
             respondError(404, "Model not found on device")
             return
         }
+        let options: BenchOptions
+        do {
+            options = try BenchOptions(query: req.query)
+        } catch let error as BenchOptionsError {
+            respondError(400, error.message)
+            return
+        } catch {
+            respondError(400, "Invalid options")
+            return
+        }
         guard server.beginBusy() else {
             respondError(409, "Device is busy")
             return
         }
-        let options = BenchOptions(query: req.query)
         idleLimit = nil // the client legitimately waits for the whole benchmark
         let server = self.server
-        Task { [weak self] in
+        // Cancelled in close(), so a disconnect or "Accept connections" off stops the benchmark between runs.
+        benchTask = Task { [weak self] in
             let (status, body) = await server.runBenchmark(path: url, name: name, options: options)
-            server.endBusy()
-            server.queue.async { self?.respond(status: status, body: body) }
+            server.queue.async {
+                server.releaseBusy()
+                self?.respond(status: status, body: body)
+            }
         }
     }
 
@@ -499,6 +563,11 @@ private final class HTTPSession {
             respondError(400, "Invalid model name")
             return
         }
+        guard server.beginBusy() else {
+            respondError(409, "Device is busy")
+            return
+        }
+        defer { server.releaseBusy() }
         do {
             try FileManager.default.removeItem(at: url)
             respondJSON(200, ErrorBody(error: ""))
@@ -517,6 +586,10 @@ private final class HTTPSession {
         }
         guard let length = Int(req.headers["content-length"] ?? ""), length >= 0 else {
             respondError(411, "Content-Length required")
+            return
+        }
+        guard length >= 4 else {
+            respondError(400, "File is too small to be a GGUF model")
             return
         }
         guard length <= DeviceServer.maxModelBytes else {
@@ -541,9 +614,7 @@ private final class HTTPSession {
             return
         }
         upload = Upload(name: final.lastPathComponent, expected: length, handle: handle, temp: temp, final: final)
-        if length == 0 {
-            finishUpload()
-        } else if !firstChunk.isEmpty {
+        if !firstChunk.isEmpty {
             handleBody(firstChunk)
         }
     }
@@ -552,6 +623,13 @@ private final class HTTPSession {
         guard let up = upload, !finished else { return }
         let remaining = up.expected - up.received
         let chunk = data.count > remaining ? data.prefix(remaining) : data
+        if up.head.count < 4 {
+            up.head.append(chunk.prefix(4 - up.head.count))
+            if up.head.count == 4 && up.head != Data("GGUF".utf8) {
+                respondError(400, "File is not a GGUF model")
+                return
+            }
+        }
         do {
             try up.handle.write(contentsOf: chunk)
         } catch {
@@ -569,9 +647,11 @@ private final class HTTPSession {
         try? up.handle.close()
         do {
             if FileManager.default.fileExists(atPath: up.final.path) {
-                try FileManager.default.removeItem(at: up.final)
+                // Atomic replace: the old model is kept if this fails.
+                _ = try FileManager.default.replaceItemAt(up.final, withItemAt: up.temp)
+            } else {
+                try FileManager.default.moveItem(at: up.temp, to: up.final)
             }
-            try FileManager.default.moveItem(at: up.temp, to: up.final)
         } catch {
             respondError(500, "Could not store the model: \(error.localizedDescription)")
             return
@@ -593,6 +673,11 @@ private final class HTTPSession {
     fileprivate func respond(status: Int, body: Data) {
         guard !finished, !closed else { return }
         finished = true
+        // Free the device before the client can see the response, so its next request is not refused as busy.
+        if holdsBusy {
+            holdsBusy = false
+            server.releaseBusy()
+        }
         let head = "HTTP/1.1 \(status) \(reason(status))\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n"
         var out = Data(head.utf8)
         out.append(body)
@@ -621,6 +706,7 @@ private final class HTTPSession {
     private func close() {
         guard !closed else { return }
         closed = true
+        benchTask?.cancel()
         connection.cancel()
         if let up = upload {
             try? up.handle.close()
@@ -629,7 +715,7 @@ private final class HTTPSession {
         }
         if holdsBusy {
             holdsBusy = false
-            server.endBusy()
+            server.releaseBusy()
         }
         onClose?()
     }
