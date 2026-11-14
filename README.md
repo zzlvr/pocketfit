@@ -20,7 +20,7 @@ pocketfit ship ./my-model --devices iphone
 ## Roadmap
 
 - [x] iPhone runner: load a GGUF model with llama.cpp and report tokens/s
-- [ ] Send a model over Wi-Fi from a CLI and get metrics back from the phone
+- [x] Send a model over Wi-Fi from a CLI and get metrics back from the phone
 - [ ] Automatic quantization selection with quality measurement and a report
 - [ ] Public benchmark table
 

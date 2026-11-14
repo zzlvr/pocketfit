@@ -14,6 +14,7 @@ from urllib.parse import quote, urlencode
 
 DEFAULT_PORT = 8765
 SERVICE_TYPE = "_pocketfit._tcp.local."
+DEFAULT_QUANTS = ["Q8_0", "Q6_K", "Q5_K_M", "Q5_0", "Q4_K_M", "Q4_0", "Q3_K_M", "Q2_K"]
 
 
 class DeviceError(Exception):
@@ -96,11 +97,16 @@ class _ProgressReader:
         self.name = name
         self.sent = 0
         self.started = time.time()
+        self.last_print = 0.0
 
     def read(self, size=-1):
         chunk = self.handle.read(size)
         self.sent += len(chunk)
-        elapsed = max(time.time() - self.started, 0.001)
+        now = time.time()
+        if chunk and now - self.last_print < 0.5 and self.sent < self.total:
+            return chunk
+        self.last_print = now
+        elapsed = max(now - self.started, 0.001)
         percent = 100.0 * self.sent / self.total if self.total else 100.0
         speed = self.sent / elapsed / 1_048_576
         print(
@@ -228,6 +234,23 @@ def cmd_bench(args):
     return 0
 
 
+def cmd_tune(args):
+    from .tools import ToolError
+    from .tune import tune
+
+    device = _device_from_args(args)
+    try:
+        report, best, out_dir = tune(device, args)
+    except ToolError as error:
+        raise DeviceError(str(error)) from error
+    print((out_dir / "report.md").read_text(encoding="utf-8"))
+    if best is None:
+        print("error: no candidate met the constraints; see the table above", file=sys.stderr)
+        return 2
+    print(f"Best: {best['quantization']} -> {out_dir / 'models' / best['file']}")
+    return 0
+
+
 def _bounded(low, high):
     """argparse type that accepts integers from low to high."""
     def parse(text):
@@ -265,6 +288,22 @@ def build_parser():
     bench.add_argument("--force-upload", action="store_true", help="upload even if a file of the same size exists")
     bench.add_argument("--out", help="write the JSON result to this file")
     bench.set_defaults(func=cmd_bench)
+
+    tune = commands.add_parser("tune", help="try several quantizations of a model on the device and pick the best")
+    tune.add_argument("source", help="path to the full-precision .gguf (F16 or F32)")
+    tune.add_argument("--min-tps", type=float, default=10.0, help="minimum tokens/s the choice must reach (default 10)")
+    tune.add_argument("--max-loss", type=float, default=None, help="maximum quality loss in percent (perplexity increase)")
+    tune.add_argument("--quants", default=",".join(DEFAULT_QUANTS), help="comma separated list, e.g. Q8_0,Q4_K_M")
+    tune.add_argument("--out", default="pocketfit-out", help="folder for the quantized files and the report")
+    tune.add_argument("--runs", type=_bounded(1, 19), default=5, help="timed runs per candidate (one more warm-up run is added)")
+    tune.add_argument("--pause", type=_bounded(0, 120), default=10, help="seconds between runs")
+    tune.add_argument("--tokens", type=_bounded(1, 512), default=64, help="tokens generated per run")
+    tune.add_argument("--settle", type=_bounded(0, 600), default=30, help="seconds to wait after an upload before timing")
+    tune.add_argument("--ppl-chunks", type=_bounded(1, 580), default=20, help="text chunks used for the quality check")
+    tune.add_argument("--gpu", action="store_true", help="measure on the GPU (Metal); default is CPU only")
+    tune.add_argument("--tools", help="folder with llama-quantize and llama-perplexity (default: download a verified copy)")
+    tune.add_argument("--text", help="plain text file for the quality check (default: WikiText-2 test split)")
+    tune.set_defaults(func=cmd_tune)
     return parser
 
 
