@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pocketfit"
+version = "0.1.0"
+description = "Send a GGUF model to a real iPhone over the local network and benchmark it"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = []
+
+[project.optional-dependencies]
+discover = ["zeroconf>=0.130"]
+
+[project.scripts]
+pocketfit = "pocketfit.cli:main"
+
+[tool.setuptools]
+packages = ["pocketfit"]

@@ -6,3 +6,5 @@ out/
 *.gguf
 .DS_Store
 CLAUDE.md
+__pycache__/
+*.egg-info/
