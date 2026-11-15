@@ -251,6 +251,17 @@ def cmd_tune(args):
     return 0
 
 
+def cmd_ship(args):
+    from .convert import prepare_source
+    from .tools import ToolError
+
+    try:
+        args.source = str(prepare_source(args.source, args))
+    except ToolError as error:
+        raise DeviceError(str(error)) from error
+    return cmd_tune(args)
+
+
 def _bounded(low, high):
     """argparse type that accepts integers from low to high."""
     def parse(text):
@@ -262,6 +273,22 @@ def _bounded(low, high):
             raise argparse.ArgumentTypeError(f"must be between {low} and {high}")
         return value
     return parse
+
+
+def _add_tune_options(tune):
+    """Options shared by `tune` and `ship`."""
+    tune.add_argument("--min-tps", type=float, default=10.0, help="minimum tokens/s the choice must reach (default 10)")
+    tune.add_argument("--max-loss", type=float, default=None, help="maximum quality loss in percent (perplexity increase)")
+    tune.add_argument("--quants", default=",".join(DEFAULT_QUANTS), help="comma separated list, e.g. Q8_0,Q4_K_M")
+    tune.add_argument("--out", default="pocketfit-out", help="folder for the quantized files and the report")
+    tune.add_argument("--runs", type=_bounded(1, 19), default=5, help="timed runs per candidate (one more warm-up run is added)")
+    tune.add_argument("--pause", type=_bounded(0, 120), default=10, help="seconds between runs")
+    tune.add_argument("--tokens", type=_bounded(1, 512), default=64, help="tokens generated per run")
+    tune.add_argument("--settle", type=_bounded(0, 600), default=30, help="seconds to wait after an upload before timing")
+    tune.add_argument("--ppl-chunks", type=_bounded(1, 580), default=20, help="text chunks used for the quality check")
+    tune.add_argument("--gpu", action="store_true", help="measure on the GPU (Metal); default is CPU only")
+    tune.add_argument("--tools", help="folder with llama-quantize and llama-perplexity (default: download a verified copy)")
+    tune.add_argument("--text", help="plain text file for the quality check (default: WikiText-2 test split)")
 
 
 def build_parser():
@@ -291,19 +318,17 @@ def build_parser():
 
     tune = commands.add_parser("tune", help="try several quantizations of a model on the device and pick the best")
     tune.add_argument("source", help="path to the full-precision .gguf (F16 or F32)")
-    tune.add_argument("--min-tps", type=float, default=10.0, help="minimum tokens/s the choice must reach (default 10)")
-    tune.add_argument("--max-loss", type=float, default=None, help="maximum quality loss in percent (perplexity increase)")
-    tune.add_argument("--quants", default=",".join(DEFAULT_QUANTS), help="comma separated list, e.g. Q8_0,Q4_K_M")
-    tune.add_argument("--out", default="pocketfit-out", help="folder for the quantized files and the report")
-    tune.add_argument("--runs", type=_bounded(1, 19), default=5, help="timed runs per candidate (one more warm-up run is added)")
-    tune.add_argument("--pause", type=_bounded(0, 120), default=10, help="seconds between runs")
-    tune.add_argument("--tokens", type=_bounded(1, 512), default=64, help="tokens generated per run")
-    tune.add_argument("--settle", type=_bounded(0, 600), default=30, help="seconds to wait after an upload before timing")
-    tune.add_argument("--ppl-chunks", type=_bounded(1, 580), default=20, help="text chunks used for the quality check")
-    tune.add_argument("--gpu", action="store_true", help="measure on the GPU (Metal); default is CPU only")
-    tune.add_argument("--tools", help="folder with llama-quantize and llama-perplexity (default: download a verified copy)")
-    tune.add_argument("--text", help="plain text file for the quality check (default: WikiText-2 test split)")
+    _add_tune_options(tune)
     tune.set_defaults(func=cmd_tune)
+
+    ship = commands.add_parser(
+        "ship", help="convert a Hugging Face model folder if needed, then pick the best quantization on the device"
+    )
+    ship.add_argument("source", help="a Hugging Face model folder, or a full-precision .gguf file")
+    _add_tune_options(ship)
+    ship.add_argument("--python", help="Python with torch and transformers, used for the conversion (default: this one)")
+    ship.add_argument("--llama-source", help="llama.cpp checkout for the converter (default: fetch the pinned version)")
+    ship.set_defaults(func=cmd_ship)
     return parser
 
 

@@ -4,7 +4,9 @@ import hashlib
 import json
 import os
 import platform
+import shutil
 import stat
+import subprocess
 import tarfile
 import urllib.request
 import zipfile
@@ -12,6 +14,8 @@ from pathlib import Path
 
 # Keep in sync with LLAMA_TAG in .github/workflows/ios-build.yml so the PC tools and the app agree.
 LLAMA_TAG = "b12230"
+LLAMA_COMMIT = "a4d4f2fd4ec85ec6a0a9ece4870416c1b6cc24f5"  # the commit that tag points to
+LLAMA_REPO = "https://github.com/ggml-org/llama.cpp.git"
 RELEASE_API = f"https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/{LLAMA_TAG}"
 TEXT_URL = "https://huggingface.co/datasets/ggml-org/ci/resolve/main/wikitext-2-raw-v1.zip"
 TEXT_MEMBER = "wikitext-2-raw/wiki.test.raw"
@@ -147,3 +151,30 @@ def ensure_text(path=None):
         raise ToolError("Unexpected size for the downloaded text; refusing to use it")
     target.write_bytes(data)
     return target
+
+
+def _git(*args, cwd=None):
+    result = subprocess.run(["git", "-c", "advice.detachedHead=false", *args], cwd=cwd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise ToolError(f"git {args[0]} failed: {(result.stderr or result.stdout).strip()[-300:]}")
+    return result.stdout.strip()
+
+
+def ensure_converter(folder=None):
+    """Return a llama.cpp source folder that has convert_hf_to_gguf.py, at the pinned commit.
+
+    The commit is checked, so the script that runs is exactly the one that was reviewed for this version.
+    """
+    if shutil.which("git") is None:
+        raise ToolError("git is required to fetch and verify the model converter")
+    path = Path(folder) if folder else home() / "src" / f"llama.cpp-{LLAMA_TAG}"
+    if not (path / "convert_hf_to_gguf.py").is_file():
+        if folder:
+            raise ToolError(f"convert_hf_to_gguf.py not found in {path}")
+        print(f"Fetching the model converter (llama.cpp {LLAMA_TAG})...", flush=True)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _git("clone", "--depth", "1", "--branch", LLAMA_TAG, "--quiet", LLAMA_REPO, str(path))
+    head = _git("rev-parse", "HEAD", cwd=path)
+    if head != LLAMA_COMMIT:
+        raise ToolError(f"The converter in {path} is at commit {head[:10]}, expected {LLAMA_COMMIT[:10]}; refusing to run it")
+    return path
