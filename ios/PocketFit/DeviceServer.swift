@@ -124,6 +124,7 @@ final class DeviceServer {
     fileprivate let queue = DispatchQueue(label: "pocketfit.server")
 
     private let stateHandler: @Sendable (String) -> Void
+    private let activityHandler: @Sendable (String) -> Void
     private var listener: NWListener?
     private var sessions: [ObjectIdentifier: HTTPSession] = [:]
     private var busy = false
@@ -135,10 +136,23 @@ final class DeviceServer {
         var blockedUntil: Date?
     }
 
-    init(token: String, modelsDirectory: URL, stateHandler: @escaping @Sendable (String) -> Void) {
+    static let idleActivity = "Ready, waiting for commands"
+
+    init(
+        token: String,
+        modelsDirectory: URL,
+        stateHandler: @escaping @Sendable (String) -> Void,
+        activityHandler: @escaping @Sendable (String) -> Void = { _ in }
+    ) {
         self.token = token
         self.modelsDirectory = modelsDirectory
         self.stateHandler = stateHandler
+        self.activityHandler = activityHandler
+    }
+
+    /// Tells the app what the server is doing right now, so the screen shows progress of remote work.
+    fileprivate func report(_ activity: String) {
+        activityHandler(activity)
     }
 
     func start() throws {
@@ -293,9 +307,11 @@ final class DeviceServer {
 
     fileprivate func runBenchmark(path: URL, name: String, options: BenchOptions) async -> (Int, Data) {
         var results: [BenchResult] = []
+        defer { report(Self.idleActivity) }
         do {
             for index in 1...options.runs {
                 if Task.isCancelled { return (499, Self.encode(ErrorBody(error: "Cancelled"))) }
+                report("Benchmark \(name): run \(index) of \(options.runs)")
                 let charging = await MainActor.run { DeviceServer.isCharging() }
                 let result = try await Task.detached(priority: .userInitiated) {
                     try LlamaRunner.run(
@@ -308,6 +324,7 @@ final class DeviceServer {
                 }.value
                 results.append(result)
                 if index < options.runs {
+                    report("Benchmark \(name): pausing after run \(index) of \(options.runs)")
                     try? await Task.sleep(nanoseconds: options.pauseSeconds * 1_000_000_000)
                 }
             }
@@ -347,6 +364,7 @@ private final class Upload {
     let name: String
     let expected: Int
     var received = 0
+    var reportedPercent = -1
     var head = Data() // first bytes of the body, checked for the GGUF magic
     let handle: FileHandle
     let temp: URL
@@ -570,6 +588,7 @@ private final class HTTPSession {
         defer { server.releaseBusy() }
         do {
             try FileManager.default.removeItem(at: url)
+            server.report("Deleted \(url.lastPathComponent)")
             respondJSON(200, ErrorBody(error: ""))
         } catch {
             respondError(404, "Model not found on device")
@@ -637,6 +656,11 @@ private final class HTTPSession {
             return
         }
         up.received += chunk.count
+        let percent = up.expected > 0 ? up.received * 100 / up.expected : 100
+        if percent != up.reportedPercent {
+            up.reportedPercent = percent
+            server.report("Receiving \(up.name): \(percent)%")
+        }
         if up.received >= up.expected {
             finishUpload()
         }
@@ -657,6 +681,7 @@ private final class HTTPSession {
             return
         }
         upload = nil
+        server.report("Received \(up.name)")
         respondJSON(201, UploadResponse(name: up.name, sizeBytes: up.received))
     }
 
@@ -712,6 +737,7 @@ private final class HTTPSession {
             try? up.handle.close()
             try? FileManager.default.removeItem(at: up.temp)
             upload = nil
+            server.report("Upload of \(up.name) was interrupted")
         }
         if holdsBusy {
             holdsBusy = false

@@ -14,6 +14,7 @@ struct ContentView: View {
     @State private var remoteOn = false
     @State private var remoteToken = ""
     @State private var remoteStatus = ""
+    @State private var remoteActivity = ""
     @State private var server: DeviceServer?
     private let benchCount = 5
     private let benchPauseSeconds: UInt64 = 10
@@ -76,6 +77,7 @@ struct ContentView: View {
                         Text("Address: \(localIPAddress() ?? "not on Wi-Fi"):\(String(DeviceServer.port))")
                         Text("Token: \(remoteToken)")
                         Text(remoteStatus).font(.footnote).foregroundColor(.secondary)
+                        Text(remoteActivity).font(.footnote)
                     }
                 }
 
@@ -198,13 +200,17 @@ struct ContentView: View {
         UIApplication.shared.isIdleTimerDisabled = on
         guard on else {
             remoteStatus = ""
+            remoteActivity = ""
             return
         }
+        remoteActivity = DeviceServer.idleActivity
         let alphabet = Array("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
         remoteToken = String((0..<10).compactMap { _ in alphabet.randomElement() })
-        let newServer = DeviceServer(token: remoteToken, modelsDirectory: documentsURL) { status in
+        let newServer = DeviceServer(token: remoteToken, modelsDirectory: documentsURL, stateHandler: { status in
             DispatchQueue.main.async { remoteStatus = status }
-        }
+        }, activityHandler: { activity in
+            DispatchQueue.main.async { remoteActivity = activity }
+        })
         do {
             try newServer.start()
             server = newServer
